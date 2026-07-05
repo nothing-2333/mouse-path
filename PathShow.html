@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>本地轨迹JSON动态查看器</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui, sans-serif;}
+html,body{width:100%;height:100%;overflow:hidden;background:#f2f2f2;}
+#trajCanvas{display:block;width:100vw;height:100vh;background:#fff;}
+.control-panel{
+    position:fixed;top:12px;left:12px;z-index:999;
+    background:rgba(0,0,0,0.75);color:#fff;
+    padding:14px;border-radius:10px;min-width:340px;
+}
+.control-panel h4{margin-bottom:10px;margin-top:0;}
+.line{margin:8px 0;}
+input[type="file"]{color:#fff}
+button{padding:6px 12px;margin:0 4px;cursor:pointer;border:none;border-radius:4px;}
+#playBtn{background:#28a745;color:#fff;}
+#pauseBtn{background:#ff9500;color:#fff;}
+#resetBtn{background:#dc3545;color:#fff;}
+select{padding:4px 8px;width:220px}
+.info-text{font-size:13px;color:#ddd;margin-top:6px}
+</style>
+</head>
+<body>
+<canvas id="trajCanvas"></canvas>
+<div class="control-panel">
+    <h4>本地轨迹JSON查看器</h4>
+    <div class="line">
+        <input type="file" id="fileInput" accept=".json">
+    </div>
+    <div class="line">
+        <span>选择样本：</span>
+        <select id="sampleSelect" disabled>
+            <option value="">请先加载文件</option>
+        </select>
+    </div>
+    <div class="line">
+        <button id="playBtn">播放轨迹</button>
+        <button id="pauseBtn">暂停</button>
+        <button id="resetBtn">重置画面</button>
+    </div>
+    <div class="info-text">
+        当前帧：<span id="frameNum">0</span> / <span id="totalPoint">0</span><br>
+        动画间隔：0.01ms/点
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('trajCanvas');
+const ctx = canvas.getContext('2d');
+// DOM
+const fileInput = document.getElementById('fileInput');
+const sampleSelect = document.getElementById('sampleSelect');
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const resetBtn = document.getElementById('resetBtn');
+const frameNumText = document.getElementById('frameNum');
+const totalPointText = document.getElementById('totalPoint');
+
+// 全局配置
+const POINT_INTERVAL = 0.01; // 每个点动画间隔 0.01ms
+let allSamples = []; // 存储文件全部样本 [{cond, traj:[[x,y],...]}]
+let currentTraj = []; // 当前选中轨迹
+let animIndex = 0;
+let animationId = null;
+let isPlaying = false;
+
+// 画布自适应
+function resizeCanvas(){
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    clearCanvas();
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// 清空画布底色
+function clearCanvas(){
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+// 绘制已播放的轨迹 + 起止圆点
+function render(){
+    clearCanvas();
+    if(currentTraj.length < 1) return;
+    // 绘制轨迹线
+    ctx.beginPath();
+    ctx.strokeStyle = '#0066ff';
+    ctx.lineWidth = 2;
+    ctx.moveTo(currentTraj[0][0], currentTraj[0][1]);
+    for(let i = 1; i <= animIndex; i++){
+        ctx.lineTo(currentTraj[i][0], currentTraj[i][1]);
+    }
+    ctx.stroke();
+
+    // 起点绿色圆
+    const start = currentTraj[0];
+    ctx.beginPath();
+    ctx.fillStyle = '#28a745';
+    ctx.arc(start[0], start[1], 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 终点红色圆
+    const end = currentTraj[currentTraj.length - 1];
+    ctx.beginPath();
+    ctx.fillStyle = '#dc3545';
+    ctx.arc(end[0], end[1], 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    frameNumText.textContent = animIndex;
+    totalPointText.textContent = currentTraj.length;
+}
+
+// 动画循环
+function animateLoop(){
+    if(!isPlaying) return;
+    animIndex += 1;
+    // 播放完成自动暂停
+    if(animIndex >= currentTraj.length){
+        pauseAnimation();
+        return;
+    }
+    render();
+    animationId = setTimeout(animateLoop, POINT_INTERVAL);
+}
+
+function playAnimation(){
+    if(isPlaying) return;
+    if(currentTraj.length === 0) return;
+    isPlaying = true;
+    animateLoop();
+}
+function pauseAnimation(){
+    isPlaying = false;
+    clearTimeout(animationId);
+}
+function resetView(){
+    pauseAnimation();
+    animIndex = 0;
+    render();
+}
+
+// 读取本地JSON文件
+fileInput.addEventListener('change', async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (event)=>{
+        try{
+            const jsonData = JSON.parse(event.target.result);
+            if(!Array.isArray(jsonData)){
+                alert('JSON顶层必须是样本数组，和采集工具导出格式一致');
+                return;
+            }
+            allSamples = jsonData;
+            // 填充下拉选择框
+            sampleSelect.innerHTML = '';
+            allSamples.forEach((item, idx)=>{
+                const opt = document.createElement('option');
+                opt.value = idx;
+                opt.textContent = `样本${idx+1} | 点数:${item.traj.length}`;
+                sampleSelect.appendChild(opt);
+            });
+            sampleSelect.disabled = false;
+            // 默认加载第一条
+            loadSample(0);
+        }catch(err){
+            alert('JSON解析失败，文件格式错误');
+            console.error(err);
+        }
+    }
+    reader.readAsText(file);
+})
+
+// 切换下拉样本
+sampleSelect.addEventListener('change', ()=>{
+    const idx = Number(sampleSelect.value);
+    loadSample(idx);
+})
+
+// 加载指定下标样本轨迹
+function loadSample(idx){
+    pauseAnimation();
+    const sample = allSamples[idx];
+    currentTraj = sample.traj;
+    animIndex = 0;
+    render();
+}
+
+// 按钮绑定
+playBtn.onclick = playAnimation;
+pauseBtn.onclick = pauseAnimation;
+resetBtn.onclick = resetView;
+render();
+</script>
+</body>
+</html>

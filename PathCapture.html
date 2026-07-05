@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>全屏鼠标轨迹采集器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: system-ui, sans-serif;
+        }
+        #trajCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            background: #f5f5f5;
+            cursor: crosshair;
+        }
+        #exportBtn {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 999;
+            padding: 10px 20px;
+            background: #1677ff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        #exportBtn:hover { background: #0958d9; }
+        #tipText {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 999;
+            background: rgba(255,255,255,0.9);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #333;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="tipText">点击绿色圆点开始录制，点击红色圆点结束</div>
+    <button id="exportBtn">导出JSON数据集</button>
+    <canvas id="trajCanvas"></canvas>
+
+<script>
+// ========== 配置参数 ==========
+const SEQ_TOTAL = 1000;       // 单条轨迹固定点数
+const SAMPLE_INTERVAL = 0.1;  // 最小采集间隔 0.1ms
+const CIRCLE_RADIUS = 24;     // 起止圆形按钮半径
+const MARGIN = 80;            // 圆点距离画布边缘最小边距
+const MIN_DISTANCE = 150;     // 起止两点最小间距，防止重合
+
+const canvas = document.getElementById('trajCanvas');
+const ctx = canvas.getContext('2d');
+const exportBtn = document.getElementById('exportBtn');
+const tipText = document.getElementById('tipText');
+
+// 全局状态
+let canvasW = window.innerWidth;
+let canvasH = window.innerHeight;
+let startCircle = { x: 0, y: 0 };  // 绿色起点圆
+let endCircle = { x: 0, y: 0 };    // 红色终点圆
+let isRecording = false;
+let trajPoints = [];
+let lastCaptureTime = 0;
+let allSamples = []; // 累积所有采集的样本
+
+// ========== 画布自适应全屏 ==========
+function resizeCanvas() {
+    canvasW = window.innerWidth;
+    canvasH = window.innerHeight;
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    // 窗口缩放后重新生成合法位置的起止圆
+    generateRandomCircles();
+    renderAll();
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ========== 全画布随机生成起止圆 + 防重合校验 ==========
+function generateRandomCircles() {
+    // 生成起点：全画布内随机，保留边距
+    startCircle.x = MARGIN + Math.random() * (canvasW - MARGIN * 2);
+    startCircle.y = MARGIN + Math.random() * (canvasH - MARGIN * 2);
+
+    // 生成终点：循环校验，直到与起点距离大于最小阈值
+    let valid = false;
+    let tryCount = 0;
+    while (!valid && tryCount < 100) {
+        endCircle.x = MARGIN + Math.random() * (canvasW - MARGIN * 2);
+        endCircle.y = MARGIN + Math.random() * (canvasH - MARGIN * 2);
+        
+        const dx = endCircle.x - startCircle.x;
+        const dy = endCircle.y - startCircle.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance >= MIN_DISTANCE) {
+            valid = true;
+        }
+        tryCount++;
+    }
+}
+
+// ========== 绘制全部内容（起止圆 + 轨迹） ==========
+function renderAll() {
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    // 绘制轨迹线
+    if (trajPoints.length >= 2) {
+        ctx.beginPath();
+        ctx.strokeStyle = '#0066ff';
+        ctx.lineWidth = 2;
+        ctx.moveTo(trajPoints[0][0], trajPoints[0][1]);
+        for (let i = 1; i < trajPoints.length; i++) {
+            ctx.lineTo(trajPoints[i][0], trajPoints[i][1]);
+        }
+        ctx.stroke();
+    }
+
+    // 绘制绿色起点圆
+    ctx.beginPath();
+    ctx.fillStyle = '#28a745';
+    ctx.arc(startCircle.x, startCircle.y, CIRCLE_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('起点', startCircle.x, startCircle.y);
+
+    // 绘制红色终点圆
+    ctx.beginPath();
+    ctx.fillStyle = '#dc3545';
+    ctx.arc(endCircle.x, endCircle.y, CIRCLE_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.fillText('终点', endCircle.x, endCircle.y);
+}
+
+// ========== 判断点击是否在圆内 ==========
+function isPointInCircle(px, py, circle) {
+    const dx = px - circle.x;
+    const dy = py - circle.y;
+    return dx * dx + dy * dy <= CIRCLE_RADIUS * CIRCLE_RADIUS;
+}
+
+// ========== 鼠标点击事件 ==========
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // 点击起点圆 → 开始录制
+    if (isPointInCircle(x, y, startCircle) && !isRecording) {
+        startRecord();
+        return;
+    }
+
+    // 点击终点圆 → 停止录制
+    if (isPointInCircle(x, y, endCircle) && isRecording) {
+        stopRecord();
+        return;
+    }
+});
+
+// ========== 鼠标移动采集坐标 ==========
+canvas.addEventListener('mousemove', (e) => {
+    if (!isRecording) return;
+    const now = performance.now();
+    if (now - lastCaptureTime < SAMPLE_INTERVAL) return;
+    lastCaptureTime = now;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    trajPoints.push([x, y]);
+    renderAll();
+});
+
+// ========== 开始录制 ==========
+function startRecord() {
+    trajPoints = [];
+    isRecording = true;
+    lastCaptureTime = performance.now();
+    tipText.textContent = '录制中... 移动鼠标到红色终点圆点击结束';
+    renderAll();
+}
+
+// ========== 停止录制 + 处理序列 + 保存样本 + 重置下一组 ==========
+function stopRecord() {
+    isRecording = false;
+
+    // 处理轨迹到固定1000点
+    let seq = [...trajPoints];
+    if (seq.length > SEQ_TOTAL) {
+        seq = seq.slice(0, SEQ_TOTAL);
+    } else {
+        const lastPos = seq.length > 0 ? seq[seq.length - 1] : [endCircle.x, endCircle.y];
+        while (seq.length < SEQ_TOTAL) {
+            seq.push([lastPos[0], lastPos[1]]);
+        }
+    }
+
+    // 保存当前样本
+    const sample = {
+        cond: [startCircle.x, startCircle.y, endCircle.x, endCircle.y],
+        traj: seq
+    };
+    allSamples.push(sample);
+
+    // 重置：清空轨迹、重新生成新的起止圆
+    trajPoints = [];
+    generateRandomCircles();
+    renderAll();
+    tipText.textContent = `已采集 ${allSamples.length} 条 | 点击绿色圆点开始下一组`;
+}
+
+// ========== 导出JSON ==========
+exportBtn.addEventListener('click', () => {
+    if (allSamples.length === 0) {
+        alert('还没有采集任何轨迹数据');
+        return;
+    }
+    const jsonStr = JSON.stringify(allSamples, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    let timestamp = new Date().getTime();
+    a.download = `traj_dataset_${timestamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    allSamples = []; // 导出后清空数据
+    tipText.textContent = `已采集 ${allSamples.length} 条 | 点击绿色圆点开始下一组`;
+});
+
+// ========== 初始化 ==========
+resizeCanvas();
+generateRandomCircles();
+renderAll();
+</script>
+</body>
+</html>
