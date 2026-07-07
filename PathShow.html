@@ -26,7 +26,7 @@ select{padding:4px 8px;width:220px}
 <body>
 <canvas id="trajCanvas"></canvas>
 <div class="control-panel">
-    <h4>本地轨迹JSON查看器</h4>
+    <h4>本地轨迹JSON动态查看器</h4>
     <div class="line">
         <input type="file" id="fileInput" accept=".json">
     </div>
@@ -43,7 +43,6 @@ select{padding:4px 8px;width:220px}
     </div>
     <div class="info-text">
         当前帧：<span id="frameNum">0</span> / <span id="totalPoint">0</span><br>
-        动画间隔：0.01ms/点
     </div>
 </div>
 
@@ -60,12 +59,12 @@ const frameNumText = document.getElementById('frameNum');
 const totalPointText = document.getElementById('totalPoint');
 
 // 全局配置
-const POINT_INTERVAL = 0.01; // 每个点动画间隔 0.01ms
-let allSamples = []; // 存储文件全部样本 [{cond, traj:[[x,y],...]}]
+let allSamples = []; // 存储文件全部样本 [{cond, traj:[[x,y,dt],...]}]
 let currentTraj = []; // 当前选中轨迹
 let animIndex = 0;
 let animationId = null;
 let isPlaying = false;
+const FALLBACK_INTERVAL = 8; // 如果轨迹点没有第三维时间间隔，则使用兜底值
 
 // 画布自适应
 function resizeCanvas(){
@@ -114,7 +113,7 @@ function render(){
     totalPointText.textContent = currentTraj.length;
 }
 
-// 动画循环
+// 动画循环：使用json内自带delta_t作为间隔
 function animateLoop(){
     if(!isPlaying) return;
     animIndex += 1;
@@ -124,7 +123,10 @@ function animateLoop(){
         return;
     }
     render();
-    animationId = setTimeout(animateLoop, POINT_INTERVAL);
+    // 读取当前点存储的时间间隔，无第三维则用兜底值
+    const point = currentTraj[animIndex];
+    const interval = point.length >= 3 ? point[2] : FALLBACK_INTERVAL;
+    animationId = setTimeout(animateLoop, interval);
 }
 
 function playAnimation(){
