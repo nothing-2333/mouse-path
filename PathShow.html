@@ -61,6 +61,7 @@ const totalPointText = document.getElementById('totalPoint');
 // 全局配置
 let allSamples = []; // 存储文件全部样本 [{cond, traj:[[x,y,dt],...]}]
 let currentTraj = []; // 当前选中轨迹
+let currentCond = [];  // 当前样本cond [sx,sy,ex,ey]
 let animIndex = 0;
 let animationId = null;
 let isPlaying = false;
@@ -96,17 +97,19 @@ function render(){
     ctx.stroke();
 
     // 起点绿色圆
-    const start = currentTraj[0];
+    const sx = currentCond[0];
+    const sy = currentCond[1];
     ctx.beginPath();
     ctx.fillStyle = '#28a745';
-    ctx.arc(start[0], start[1], 7, 0, Math.PI * 2);
+    ctx.arc(sx, sy, 7, 0, Math.PI * 2);
     ctx.fill();
 
     // 终点红色圆
-    const end = currentTraj[currentTraj.length - 1];
+    const ex = currentCond[2];
+    const ey = currentCond[3];
     ctx.beginPath();
     ctx.fillStyle = '#dc3545';
-    ctx.arc(end[0], end[1], 7, 0, Math.PI * 2);
+    ctx.arc(ex, ey, 7, 0, Math.PI * 2);
     ctx.fill();
 
     frameNumText.textContent = animIndex;
@@ -187,6 +190,7 @@ sampleSelect.addEventListener('change', ()=>{
 function loadSample(idx){
     pauseAnimation();
     const sample = allSamples[idx];
+    currentCond = sample.cond;
     currentTraj = sample.traj;
     animIndex = 0;
     render();

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from torch.nn.utils import spectral_norm, pack_padded_sequence, pad_packed_sequence
+from torch.nn.utils import spectral_norm
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import math
 import os
 import json
@@ -19,11 +20,12 @@ CANVAS_H = 1080.0
 # Δt 归一化上限(默认值, 数据集统计后自动覆盖)
 MAX_DELTA_T = 50.0
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
 # 权重文件路径
-G_WEIGHT_PATH = "generator_wgan.pth"
-D_WEIGHT_PATH = "discriminator_wgan.pth"
+G_WEIGHT_PATH = os.path.join(ROOT, "generator_wgan.pth")
+D_WEIGHT_PATH = os.path.join(ROOT, "discriminator_wgan.pth")
 # 配置文件路径
-CONFIG_PATH = "model_config.json"
+CONFIG_PATH = os.path.join(ROOT, "model_config.json")
 
 # ---------------------- 全局配置动态设置 ----------------------
 def set_canvas_size(width, height):

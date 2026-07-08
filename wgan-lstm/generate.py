@@ -1,10 +1,10 @@
 import json
 import random
-import wgan_model
-from wgan_model import generate_single_trajectory, load_config
+import model
+from model import generate_single_trajectory, load_config, ROOT
 
 # 生成配置
-OUT_JSON = "generated_traj.json"
+OUT_JSON = os.path.join(ROOT, "generated_traj.json")
 GEN_COUNT = 10
 MARGIN = 80
 MIN_DIST = 150
@@ -13,8 +13,8 @@ MAX_SEQ_LEN = 200
 
 def random_cond_pixel():
     """基于统计后的画布尺寸随机生成合法起终点"""
-    canvas_w = wgan_model.CANVAS_W
-    canvas_h = wgan_model.CANVAS_H
+    canvas_w = model.CANVAS_W
+    canvas_h = model.CANVAS_H
     while True:
         x0 = random.uniform(MARGIN, canvas_w - MARGIN)
         y0 = random.uniform(MARGIN, canvas_h - MARGIN)

@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 import random
 import time
+import os
 
-from wgan_model import (
+from model import (
     POINT_DIM, COND_DIM, DEVICE,
-    G_WEIGHT_PATH, D_WEIGHT_PATH,
+    ROOT, G_WEIGHT_PATH, D_WEIGHT_PATH,
     CondGenerator, Discriminator, load_model_weights,
     normalize_cond, normalize_traj,
     set_canvas_size, set_max_delta_t, save_config, to_device
@@ -17,15 +18,15 @@ from wgan_model import (
 
 # ========== 训练超参 ==========
 BATCH = 128
-LR = 2e-4
-N_CRITIC = 3
+LR = 1e-4
+N_CRITIC = 5
 LAMBDA_GP = 10.0        # 梯度惩罚权重
-MAX_BOUND_W = 5.0       # 首尾坐标约束最大权重
+MAX_BOUND_W = 2.0       # 首尾坐标约束最大权重
 MAX_GRAD_NORM = 1.0
-TOTAL_EPOCHS = 100
-LOG_FILE = "train_log.txt"
+TOTAL_EPOCHS = 60
 
-TRAIN_FOLDER = "../data"
+LOG_FILE = os.path.join(ROOT, "train_log.txt")
+TRAIN_FOLDER = os.path.join(ROOT, "../data/click")
 
 # 数据划分
 TRAIN_RATIO = 0.8
@@ -132,7 +133,7 @@ def collate_fn(batch):
 
 def compute_gradient_penalty(D, real_traj, fake_traj, cond, seq_lengths):
     '''
-    WGAN-GP 梯度惩罚
+    WGAN-GP 梯度惩罚, 不裁剪权重, 只通过损失反向修正梯度, 训练稳定很多
     '''
     
     # 真假轨迹之间随机插值
@@ -283,7 +284,7 @@ if __name__ == "__main__":
 
     # 清空历史日志
     with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("=== WGAN-GP 训练日志 ===\n")
+        f.write("")
 
     # 训练循环
     start_time = time.time()
@@ -334,7 +335,7 @@ if __name__ == "__main__":
             opt_g.step()
 
             # 打印训练进度
-            if idx % 10 == 0:
+            if idx % 3 == 0:
                 print(
                     f"Epoch {epoch:2d} Batch {idx:3d} | D:{loss_d.item():.4f} | "
                     f"G:{loss_g.item():.4f} | Bound:{(bound_w*loss_bound).item():.4f} | "
