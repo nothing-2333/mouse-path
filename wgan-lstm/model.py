@@ -7,8 +7,8 @@ import os
 import json
 
 # ========== 全局超参(训练时由数据集自动统计覆盖) ==========
-POINT_DIM = 3       # 轨迹点维度：x, y, Δt
-COND_DIM = 4        # 条件维度：起点(x0,y0) + 终点(x1,y1)
+POINT_DIM = 3       # 轨迹点维度: x, y, Δt
+COND_DIM = 4        # 条件维度: 起点(x0,y0) + 终点(x1,y1)
 HIDDEN = 96
 Z_DIM = 32          # 全局噪声维度
 NUM_LAYERS = 2      # LSTM 层数
@@ -19,6 +19,8 @@ CANVAS_W = 1920.0
 CANVAS_H = 1080.0
 # Δt 归一化上限(默认值, 数据集统计后自动覆盖)
 MAX_DELTA_T = 50.0
+# 首点dt均值(数据集统计后自动覆盖, 用于自回归初始化)
+FIRST_DT_MEAN = 0.0
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 # 权重文件路径
@@ -27,7 +29,7 @@ D_WEIGHT_PATH = os.path.join(ROOT, "discriminator_wgan.pth")
 # 配置文件路径
 CONFIG_PATH = os.path.join(ROOT, "model_config.json")
 
-# ---------------------- 全局配置动态设置 ----------------------
+# 全局配置动态设置
 def set_canvas_size(width, height):
     """动态设置画布尺寸, 由数据集统计后调用"""
     global CANVAS_W, CANVAS_H
@@ -40,6 +42,12 @@ def set_max_delta_t(value):
     global MAX_DELTA_T
     MAX_DELTA_T = float(value)
     print(f"[配置更新] Δt归一化上限已设为: {MAX_DELTA_T:.3f}")
+    
+def set_first_dt_mean(value):
+    """动态设置首点dt均值, 由数据集统计后调用"""
+    global FIRST_DT_MEAN
+    FIRST_DT_MEAN = float(value)
+    print(f"[配置更新] 首点dt均值已设为: {FIRST_DT_MEAN:.3f}")
 
 def save_config():
     """保存当前所有归一化配置到文件, 供推理时加载对齐"""
@@ -47,6 +55,7 @@ def save_config():
         "CANVAS_W": CANVAS_W,
         "CANVAS_H": CANVAS_H,
         "MAX_DELTA_T": MAX_DELTA_T,
+        "FIRST_DT_MEAN": FIRST_DT_MEAN,
         "POINT_DIM": POINT_DIM,
         "COND_DIM": COND_DIM,
         "HIDDEN": HIDDEN,
@@ -65,34 +74,17 @@ def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
     
-    global CANVAS_W, CANVAS_H, MAX_DELTA_T
+    global CANVAS_W, CANVAS_H, MAX_DELTA_T, FIRST_DT_MEAN
     CANVAS_W = float(config["CANVAS_W"])
     CANVAS_H = float(config["CANVAS_H"])
     MAX_DELTA_T = float(config["MAX_DELTA_T"])
-    print(f"[配置加载] 画布 {CANVAS_W:.1f}x{CANVAS_H:.1f} | Δt上限 {MAX_DELTA_T:.3f}")
+    FIRST_DT_MEAN = float(config["FIRST_DT_MEAN"]) 
+    print(f"[配置加载] 画布 {CANVAS_W:.1f}x{CANVAS_H:.1f} | Δt上限 {MAX_DELTA_T:.3f} | 首点dt均值 {FIRST_DT_MEAN:.3f}")
     return True
 
 def to_device(*tensors):
     """批量迁移张量到设备"""
     return [t.to(DEVICE) for t in tensors]
-
-class SinusoidalPositionalEncoding(nn.Module):
-    """正弦位置编码, 为生成器注入绝对位置信息, 解决静态初始特征时序多样性不足问题"""
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        seq_len = x.size(1)
-        return x + self.pe[:, :seq_len, :]
 
 # 归一化工具函数
 def normalize_xy(x, y):
@@ -142,57 +134,102 @@ class CondGenerator(nn.Module):
         super().__init__()
         self.input_proj = nn.Sequential(
             nn.Linear(COND_DIM + Z_DIM, HIDDEN),
-            nn.LeakyReLU(0.2)
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.1)
         )
-        self.pos_enc = SinusoidalPositionalEncoding(HIDDEN + COND_DIM)
+        
         self.lstm = nn.LSTM(
-            input_size=HIDDEN + COND_DIM,
+            input_size=POINT_DIM + HIDDEN,
             hidden_size=HIDDEN,
             num_layers=NUM_LAYERS,
-            batch_first=True,
-            dropout=0.1
+            batch_first=True
         )
+        # 预测下一个轨迹点
         self.out_fc = nn.Sequential(
             nn.Linear(HIDDEN, HIDDEN // 2),
             nn.LeakyReLU(0.2),
+            nn.Dropout(0.1),
             nn.Linear(HIDDEN // 2, POINT_DIM),
             nn.Tanh()
         )
 
-    def forward(self, cond, seq_len):
+    def forward(self, cond, seq_len, real_traj=None):
+        """
+        Args:
+            cond: [B, COND_DIM] 归一化起止条件
+            seq_len: int 生成序列总长度
+            real_traj: [B, seq_len, POINT_DIM] 可选, 传入则启用 Teacher Forcing 并行训练模式
+        Returns:
+            traj: [B, seq_len, POINT_DIM] 完整生成轨迹
+        """
         b_size = cond.shape[0]
         device = cond.device
 
-        # 随机噪声 + 条件拼接
+        # 1. 全局特征: 噪声 + 条件
         z = torch.randn(b_size, Z_DIM, device=device)
         z_cond = torch.cat([cond, z], dim=-1)
-        hidden_feat = self.input_proj(z_cond)   # Linear(36→96) → [B,96]
+        global_feat = self.input_proj(z_cond)  # [B, HIDDEN]
 
-        # 每一步都带上全局条件
-        hidden_seq = hidden_feat.unsqueeze(1).expand(-1, seq_len, -1)
-        cond_expand = cond.unsqueeze(1).expand(-1, seq_len, -1)
-        lstm_input = torch.cat([hidden_seq, cond_expand], dim=-1)   # [B, L, 100]
-
+        if real_traj is not None:
+            # Teacher Forcing 模式
+            # 输入: 前 seq_len-1 个真实点, 预测后 seq_len-1 个点
+            input_traj = real_traj[:, :-1, :]  # [B, L-1, 3]
+            # 全局特征扩展到每个时间步
+            global_expand = global_feat.unsqueeze(1).expand(-1, seq_len - 1, -1)
+            lstm_input = torch.cat([input_traj, global_expand], dim=-1)  # [B, L-1, 3+HIDDEN]
+            
+            # LSTM 一次性前向, 完全并行
+            lstm_out, _ = self.lstm(lstm_input)  # [B, L-1, HIDDEN]
+            pred_points = self.out_fc(lstm_out)  # [B, L-1, 3]
+            
+            # 拼接起点, 直接使用真实轨迹首点
+            start_point = real_traj[:, 0:1, :]  # [B, 1, 3]
+            traj = torch.cat([start_point, pred_points], dim=1)  # [B, L, 3]
         
-        lstm_input = self.pos_enc(lstm_input)   # 位置编码
-        lstm_out, _ = self.lstm(lstm_input)     # LSTM 前向, [B, L, 96]
-        traj = self.out_fc(lstm_out)            # [B, L, 3]
+        else:
+            # 推理/生成假样本用
+            # 首点xy强制对齐条件起点
+            start_xy = cond[:, 0:2]  # [B, 2]
+            # dt初始值根据真实数据首点dt分布调整
+            dt_mean_norm = normalize_dt(FIRST_DT_MEAN)
+            dt_noise = torch.randn(b_size, 1, device=device) * 0.05
+            dt_init = dt_mean_norm + dt_noise
+            # 裁剪到归一化合法范围 [-1, 1]，避免越界
+            dt_init = torch.clamp(dt_init, -1.0, 1.0)
+            prev_point = torch.cat([start_xy, dt_init], dim=-1)  # [B, 3]
+
+            # 初始化 LSTM 隐藏状态
+            h = torch.zeros(NUM_LAYERS, b_size, HIDDEN, device=device)
+            c = torch.zeros(NUM_LAYERS, b_size, HIDDEN, device=device)
+
+            # 逐点自回归生成
+            traj_list = [prev_point.unsqueeze(1)]
+            for _ in range(1, seq_len):
+                lstm_in = torch.cat([prev_point, global_feat], dim=-1).unsqueeze(1)  # [B, 1, 3+96]
+                output, (h, c) = self.lstm(lstm_in, (h, c))
+                next_point = self.out_fc(output.squeeze(1))  # [B, 3]
+                traj_list.append(next_point.unsqueeze(1))
+                prev_point = next_point
+
+            traj = torch.cat(traj_list, dim=1)  # [B, seq_len, 3]
+        
         return traj
 
 # 判别器
 class Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
+        # LSTM 同步移除 dropout, 保持训练/推理行为一致
         self.lstm = nn.LSTM(
             input_size=POINT_DIM + COND_DIM,
             hidden_size=HIDDEN,
             num_layers=NUM_LAYERS,
-            batch_first=True,
-            dropout=0.1
+            batch_first=True
         )
         self.class_head = nn.Sequential(
             spectral_norm(nn.Linear(HIDDEN, HIDDEN // 2)),
             nn.LeakyReLU(0.2),
+            nn.Dropout(0.1),
             spectral_norm(nn.Linear(HIDDEN // 2, 1))
         )
 
@@ -204,31 +241,28 @@ class Discriminator(nn.Module):
         cond_expand = cond.unsqueeze(1).expand(-1, max_len, -1)
         x = torch.cat([traj_seq, cond_expand], dim=-1)
 
-        # 只把有效轨迹送入LSTM, 尾部0不参与计算
+        # 打包变长序列, 仅有效位置参与LSTM计算
         packed_x = pack_padded_sequence(
             x, seq_lengths.cpu(), batch_first=True, enforce_sorted=True
         )
         packed_feat, _ = self.lstm(packed_x)
-        # 还原规整张量, padding位置恢复0
         feat, _ = pad_packed_sequence(packed_feat, batch_first=True, total_length=max_len)
 
-        # 掩码平均池化
-        mask = torch.arange(max_len, device=device).unsqueeze(0) < seq_lengths.unsqueeze(1)
-        mask = mask.unsqueeze(-1).float()
-        feat_sum = (feat * mask).sum(dim=1)
-        feat_avg = feat_sum / seq_lengths.unsqueeze(-1).float()
+        # 取每个样本最后一个有效时间步的隐藏状态
+        end_indices = (seq_lengths - 1).view(-1, 1, 1).expand(-1, 1, HIDDEN)
+        last_feat = torch.gather(feat, 1, end_indices).squeeze(1)  # [B, HIDDEN]
 
-        score = self.class_head(feat_avg)
+        score = self.class_head(last_feat)
         return score
 
 # 权重工具 
 def load_model_weights(model, weight_path):
     if os.path.exists(weight_path):
         model.load_state_dict(torch.load(weight_path, map_location=DEVICE))
-        print(f"成功加载权重：{weight_path}")
+        print(f"成功加载权重: {weight_path}")
         return True
     else:
-        print(f"未找到权重文件：{weight_path}, 使用随机初始化")
+        print(f"未找到权重文件: {weight_path}, 使用随机初始化")
         return False
 
 # 推理函数

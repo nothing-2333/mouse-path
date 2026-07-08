@@ -1,5 +1,6 @@
 import json
 import random
+import os
 import model
 from model import generate_single_trajectory, load_config, ROOT
 

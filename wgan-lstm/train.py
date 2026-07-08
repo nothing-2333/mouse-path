@@ -13,7 +13,7 @@ from model import (
     ROOT, G_WEIGHT_PATH, D_WEIGHT_PATH,
     CondGenerator, Discriminator, load_model_weights,
     normalize_cond, normalize_traj,
-    set_canvas_size, set_max_delta_t, save_config, to_device
+    set_canvas_size, set_max_delta_t, set_first_dt_mean, save_config, to_device
 )
 
 # ========== 训练超参 ==========
@@ -21,9 +21,10 @@ BATCH = 128
 LR = 1e-4
 N_CRITIC = 5
 LAMBDA_GP = 10.0        # 梯度惩罚权重
-MAX_BOUND_W = 2.0       # 首尾坐标约束最大权重
+MAX_BOUND_W = 3.0       # 首尾坐标约束最大权重
 MAX_GRAD_NORM = 1.0
 TOTAL_EPOCHS = 60
+RECON_W = 1.0           # Teacher Forcing 重建损失权重, 越大训练越稳, 过大会降低多样性
 
 LOG_FILE = os.path.join(ROOT, "train_log.txt")
 TRAIN_FOLDER = os.path.join(ROOT, "../data/click")
@@ -59,6 +60,8 @@ class TrajDataset(Dataset):
         self.max_x = 0.0
         self.max_y = 0.0
         self.max_dt = 0.0
+        self.first_dt_sum = 0.0
+        self.sample_count = 0
 
         if sample_list is not None:
             self.all_samples = sample_list
@@ -91,6 +94,10 @@ class TrajDataset(Dataset):
         x0, y0, x1, y1 = item["cond"]
         self.max_x = max(self.max_x, x0, x1)
         self.max_y = max(self.max_y, y0, y1)
+        first_dt = item["traj"][0][2]
+        self.first_dt_sum += first_dt
+        self.sample_count += 1
+        
         for point in item["traj"]:
             x, y, dt = point
             self.max_x = max(self.max_x, x)
@@ -112,6 +119,11 @@ class TrajDataset(Dataset):
 
     def get_max_dt(self):
         return self.max_dt
+    
+    def get_first_dt_mean(self):
+        if self.sample_count == 0:
+            return 0.0
+        return self.first_dt_sum / self.sample_count
 
 def collate_fn(batch):
     '''
@@ -133,12 +145,14 @@ def collate_fn(batch):
 
 def compute_gradient_penalty(D, real_traj, fake_traj, cond, seq_lengths):
     '''
-    WGAN-GP 梯度惩罚, 不裁剪权重, 只通过损失反向修正梯度, 训练稳定很多
+    WGAN-GP 梯度惩罚, 已修复变量未定义Bug, padding位置梯度清零
     '''
-    
-    # 真假轨迹之间随机插值
     batch_size = real_traj.size(0)
-    alpha = torch.rand(batch_size, 1, 1, device=real_traj.device)
+    max_len = real_traj.size(1)  # 修复: 从真实轨迹获取序列长度
+    device = real_traj.device    # 修复: 从真实轨迹获取设备
+
+    # 真假轨迹之间随机插值
+    alpha = torch.rand(batch_size, 1, 1, device=device)
     alpha = alpha.expand_as(real_traj)
     interpolates = alpha * real_traj + (1 - alpha) * fake_traj
     interpolates.requires_grad_(True)
@@ -156,6 +170,11 @@ def compute_gradient_penalty(D, real_traj, fake_traj, cond, seq_lengths):
         retain_graph=True,
         only_inputs=True
     )[0]
+
+    # padding位置梯度清零, 仅有效位置参与范数计算
+    idx = torch.arange(max_len, device=device).unsqueeze(0)
+    mask = (idx < seq_lengths.unsqueeze(1)).unsqueeze(-1).float()
+    gradients = gradients * mask
 
     # 计算梯度惩罚: 约束梯度2-范数接近 1
     gradients = gradients.reshape(batch_size, -1)
@@ -177,10 +196,9 @@ def calculate_eval_loss(G, D, loader):
     '''
     评估函数
     '''
-    
     G.eval()
     D.eval()
-    total_d, total_g, total_bound = 0.0, 0.0, 0.0
+    total_d, total_g, total_bound, total_recon = 0.0, 0.0, 0.0, 0.0
     batch_num = 0
     with torch.no_grad():
         for cond, real_traj, seq_lengths in loader:
@@ -188,7 +206,6 @@ def calculate_eval_loss(G, D, loader):
             max_len = real_traj.shape[1]
 
             score_real = D(real_traj, cond, seq_lengths)
-            # 生成轨迹后清零 padding, 与真实轨迹格式对齐
             fake_traj_full = G(cond, max_len)
             fake_traj = mask_padding(fake_traj_full, seq_lengths)
             score_fake = D(fake_traj, cond, seq_lengths)
@@ -196,7 +213,7 @@ def calculate_eval_loss(G, D, loader):
             loss_d = torch.mean(score_fake) - torch.mean(score_real)
             loss_g = -torch.mean(score_fake)
 
-            # 首尾坐标约束(仅xy, 取真实末尾点)
+            # 首尾坐标约束
             start_target = cond[:, 0:2]
             end_target = cond[:, 2:4]
             fake_start = fake_traj[:, 0, 0:2]
@@ -205,24 +222,34 @@ def calculate_eval_loss(G, D, loader):
             loss_bound = torch.mean((fake_start - start_target) ** 2) + \
                         torch.mean((fake_end - end_target) ** 2)
 
+            # Teacher Forcing 重建损失
+            recon_t_full = G(cond, max_len, real_traj=real_traj)
+            recon_t = mask_padding(recon_t_full, seq_lengths)
+            idx_arr = torch.arange(max_len, device=cond.device).unsqueeze(0)
+            valid_mask = (idx_arr < seq_lengths.unsqueeze(1)).unsqueeze(-1).float()
+            valid_mask[:, 0, :] = 0.0
+            loss_recon = torch.sum((recon_t - real_traj) ** 2 * valid_mask) / torch.sum(valid_mask)
+
             total_d += loss_d.item()
             total_g += loss_g.item()
             total_bound += loss_bound.item()
+            total_recon += loss_recon.item()
             batch_num += 1
 
     avg_d = total_d / max(batch_num, 1)
     avg_g = total_g / max(batch_num, 1)
     avg_bound = total_bound / max(batch_num, 1)
+    avg_recon = total_recon / max(batch_num, 1)
     G.train()
     D.train()
-    return avg_d, avg_g, avg_bound
+    return avg_d, avg_g, avg_bound, avg_recon
 
 def save_weights(model, path):
     torch.save(model.state_dict(), path)
 
-def write_log(epoch, test_d, test_g, test_bound):
+def write_log(epoch, test_d, test_g, test_bound, test_recon):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"Epoch {epoch:3d} | D_loss: {test_d:.4f} | G_loss: {test_g:.4f} | Bound: {test_bound:.4f}\n")
+        f.write(f"Epoch {epoch:3d} | D_loss: {test_d:.4f} | G_loss: {test_g:.4f} | Bound: {test_bound:.4f} | Recon: {test_recon:.4f}\n")
 
 if __name__ == "__main__":
     # 加载全部数据并统计值域
@@ -235,6 +262,7 @@ if __name__ == "__main__":
     max_dt = full_dataset.get_max_dt()
     set_canvas_size(canvas_w * SAFE_SCALE, canvas_h * SAFE_SCALE)
     set_max_delta_t(max_dt * SAFE_SCALE)
+    set_first_dt_mean(full_dataset.get_first_dt_mean())
     save_config()
 
     # 数据集划分
@@ -296,14 +324,13 @@ if __name__ == "__main__":
             cond_in, real_traj, seq_lengths = to_device(cond_in, real_traj, seq_lengths)
             max_len = real_traj.shape[1]
 
-            # ========== 更新判别器 N 次 ==========
+            # 更新判别器 N_CRITIC 次
+            # 提前生成1次假轨迹, 循环内复用, 大幅减少自回归开销
+            fake_t_full = G(cond_in, max_len)
+            fake_t = mask_padding(fake_t_full, seq_lengths).detach()
             for _ in range(N_CRITIC):
                 opt_d.zero_grad()
                 s_real = D(real_traj, cond_in, seq_lengths)
-
-                # 生成轨迹后清零padding, 再 detach 送入判别器
-                fake_t_full = G(cond_in, max_len)
-                fake_t = mask_padding(fake_t_full, seq_lengths).detach()
                 s_fake = D(fake_t, cond_in, seq_lengths)
 
                 gp = compute_gradient_penalty(D, real_traj, fake_t, cond_in, seq_lengths)
@@ -313,14 +340,25 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(D.parameters(), MAX_GRAD_NORM)
                 opt_d.step()
 
-            # ========== 更新生成器 ==========
+            # 更新生成器
             opt_g.zero_grad()
+
+            # 自回归生成假轨迹, 计算对抗损失
             fake_t_full = G(cond_in, max_len)
             fake_t = mask_padding(fake_t_full, seq_lengths)
             s_fake = D(fake_t, cond_in, seq_lengths)
             loss_g = -torch.mean(s_fake)
 
-            # 首尾约束(基于mask后的轨迹, 首尾均在有效区间内, 结果一致)
+            # Teacher Forcing 重建损失
+            recon_t_full = G(cond_in, max_len, real_traj=real_traj)
+            recon_t = mask_padding(recon_t_full, seq_lengths)
+            # 只计算有效位置MSE, 首点为真实值不计损失
+            idx_arr = torch.arange(max_len, device=cond_in.device).unsqueeze(0)
+            valid_mask = (idx_arr < seq_lengths.unsqueeze(1)).unsqueeze(-1).float()
+            valid_mask[:, 0, :] = 0.0
+            loss_recon = torch.sum((recon_t - real_traj) ** 2 * valid_mask) / torch.sum(valid_mask)
+
+            # 首尾坐标约束
             start_target = cond_in[:, 0:2]
             end_target = cond_in[:, 2:4]
             fake_start = fake_t[:, 0, 0:2]
@@ -329,7 +367,8 @@ if __name__ == "__main__":
             loss_bound = torch.mean((fake_start - start_target) ** 2) + \
                         torch.mean((fake_end - end_target) ** 2)
 
-            loss_g_total = loss_g + bound_w * loss_bound
+            # 4. 总损失
+            loss_g_total = loss_g + RECON_W * loss_recon + bound_w * loss_bound
             loss_g_total.backward()
             nn.utils.clip_grad_norm_(G.parameters(), MAX_GRAD_NORM)
             opt_g.step()
@@ -338,16 +377,16 @@ if __name__ == "__main__":
             if idx % 3 == 0:
                 print(
                     f"Epoch {epoch:2d} Batch {idx:3d} | D:{loss_d.item():.4f} | "
-                    f"G:{loss_g.item():.4f} | Bound:{(bound_w*loss_bound).item():.4f} | "
-                    f"GP:{gp.item():.4f} | W:{bound_w:.2f}"
+                    f"G:{loss_g.item():.4f} | Recon:{loss_recon.item():.4f} | "
+                    f"Bound:{(bound_w*loss_bound).item():.4f} | GP:{gp.item():.4f} | W:{bound_w:.2f}"
                 )
 
         # Epoch 结束评估
-        test_d, test_g, test_bound = calculate_eval_loss(G, D, test_loader)
-        write_log(epoch, test_d, test_g, test_bound)
+        test_d, test_g, test_bound, test_recon = calculate_eval_loss(G, D, test_loader)
+        write_log(epoch, test_d, test_g, test_bound, test_recon)
 
         print(f"\n---------- Epoch {epoch} 测试集 ----------")
-        print(f"D_loss: {test_d:.4f} | G_loss: {test_g:.4f} | Bound_loss: {test_bound:.4f}")
+        print(f"D_loss: {test_d:.4f} | G_loss: {test_g:.4f} | Bound_loss: {test_bound:.4f} | Recon_loss: {test_recon:.4f}")
 
         # 保存权重
         save_weights(G, G_WEIGHT_PATH)
@@ -356,7 +395,7 @@ if __name__ == "__main__":
 
     # 最终验证集评估
     print("==================== 训练完成, 验证集最终评估 ====================")
-    val_d, val_g, val_bound = calculate_eval_loss(G, D, val_loader)
-    print(f"Val D_loss: {val_d:.4f} | Val G_loss: {val_g:.4f} | Val Bound: {val_bound:.4f}")
+    val_d, val_g, val_bound, val_recon = calculate_eval_loss(G, D, val_loader)
+    print(f"Val D_loss: {val_d:.4f} | Val G_loss: {val_g:.4f} | Val Bound: {val_bound:.4f} | Val Recon: {val_recon:.4f}")
     print(f"总训练耗时: {time.time()-start_time:.1f}s")
     print("================================================================")

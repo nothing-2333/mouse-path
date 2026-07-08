@@ -91,7 +91,7 @@ function render(){
     ctx.strokeStyle = '#0066ff';
     ctx.lineWidth = 2;
     ctx.moveTo(currentTraj[0][0], currentTraj[0][1]);
-    for(let i = 1; i <= animIndex; i++){
+    for(let i = 0; i <= animIndex; i++){
         ctx.lineTo(currentTraj[i][0], currentTraj[i][1]);
     }
     ctx.stroke();
@@ -119,16 +119,19 @@ function render(){
 // 动画循环：使用json内自带delta_t作为间隔
 function animateLoop(){
     if(!isPlaying) return;
-    animIndex += 1;
+
     // 播放完成自动暂停
     if(animIndex >= currentTraj.length){
         pauseAnimation();
         return;
     }
     render();
+
     // 读取当前点存储的时间间隔，无第三维则用兜底值
     const point = currentTraj[animIndex];
     const interval = point.length >= 3 ? point[2] : FALLBACK_INTERVAL;
+
+    animIndex += 1;
     animationId = setTimeout(animateLoop, interval);
 }
 
