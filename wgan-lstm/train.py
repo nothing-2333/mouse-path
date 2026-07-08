@@ -21,7 +21,7 @@ BATCH = 128
 LR = 1e-4
 N_CRITIC = 5
 LAMBDA_GP = 10.0        # 梯度惩罚权重
-MAX_BOUND_W = 3.0       # 首尾坐标约束最大权重
+BOUND_W = 3.0       # 首尾坐标约束最大权重
 MAX_GRAD_NORM = 1.0
 TOTAL_EPOCHS = 60
 RECON_W = 1.0           # Teacher Forcing 重建损失权重, 越大训练越稳, 过大会降低多样性
@@ -181,17 +181,6 @@ def compute_gradient_penalty(D, real_traj, fake_traj, cond, seq_lengths):
     gp = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
     return gp
 
-def get_bound_weight(epoch, total_epochs):
-    '''
-    渐进式首尾约束权重
-    '''
-    
-    warmup_epochs = int(total_epochs * 0.2)
-    if epoch < warmup_epochs:
-        return 0.0
-    progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
-    return MAX_BOUND_W * min(1.0, progress)
-
 def calculate_eval_loss(G, D, loader):
     '''
     评估函数
@@ -318,7 +307,6 @@ if __name__ == "__main__":
     start_time = time.time()
 
     for epoch in range(TOTAL_EPOCHS):
-        bound_w = get_bound_weight(epoch, TOTAL_EPOCHS)
 
         for idx, (cond_in, real_traj, seq_lengths) in enumerate(train_loader):
             cond_in, real_traj, seq_lengths = to_device(cond_in, real_traj, seq_lengths)
@@ -368,7 +356,7 @@ if __name__ == "__main__":
                         torch.mean((fake_end - end_target) ** 2)
 
             # 4. 总损失
-            loss_g_total = loss_g + RECON_W * loss_recon + bound_w * loss_bound
+            loss_g_total = loss_g + RECON_W * loss_recon + BOUND_W * loss_bound
             loss_g_total.backward()
             nn.utils.clip_grad_norm_(G.parameters(), MAX_GRAD_NORM)
             opt_g.step()
@@ -377,8 +365,8 @@ if __name__ == "__main__":
             if idx % 3 == 0:
                 print(
                     f"Epoch {epoch:2d} Batch {idx:3d} | D:{loss_d.item():.4f} | "
-                    f"G:{loss_g.item():.4f} | Recon:{loss_recon.item():.4f} | "
-                    f"Bound:{(bound_w*loss_bound).item():.4f} | GP:{gp.item():.4f} | W:{bound_w:.2f}"
+                    f"G:{loss_g.item():.4f} | Recon:{(RECON_W*loss_recon).item():.4f} | "
+                    f"Bound:{(BOUND_W*loss_bound).item():.4f} | GP:{gp.item():.4f}"
                 )
 
         # Epoch 结束评估
