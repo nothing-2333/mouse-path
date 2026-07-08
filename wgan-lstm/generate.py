@@ -3,12 +3,12 @@ import random
 import wgan_model
 from wgan_model import generate_single_trajectory, load_config
 
-# ========== 生成配置 ==========
+# 生成配置
 OUT_JSON = "generated_traj.json"
 GEN_COUNT = 10
 MARGIN = 80
 MIN_DIST = 150
-MIN_SEQ_LEN = 50
+MIN_SEQ_LEN = 40
 MAX_SEQ_LEN = 200
 
 def random_cond_pixel():
@@ -25,7 +25,7 @@ def random_cond_pixel():
             return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
 
 if __name__ == "__main__":
-    # 加载训练配置，保证归一化参数与训练一致
+    # 加载训练配置, 保证归一化参数与训练一致
     load_config()
     output_samples = []
     print(f"\n开始生成 {GEN_COUNT} 条轨迹...\n")
@@ -45,4 +45,4 @@ if __name__ == "__main__":
     with open(OUT_JSON, "w", encoding="utf-8") as f:
         json.dump(output_samples, f, indent=2, ensure_ascii=False)
 
-    print(f"\n生成完成，结果已写入 {OUT_JSON}")
+    print(f"\n生成完成, 结果已写入 {OUT_JSON}")

@@ -5,7 +5,7 @@ import math
 import os
 import json
 
-# ========== 全局超参（训练时由数据集自动统计覆盖） ==========
+# ========== 全局超参(训练时由数据集自动统计覆盖) ==========
 POINT_DIM = 3       # 轨迹点维度：x, y, Δt
 COND_DIM = 4        # 条件维度：起点(x0,y0) + 终点(x1,y1)
 HIDDEN = 96
@@ -13,34 +13,34 @@ Z_DIM = 32          # 全局噪声维度
 NUM_LAYERS = 2      # LSTM 层数
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 画布尺寸（默认值，数据集统计后自动覆盖）
+# 画布尺寸(默认值, 数据集统计后自动覆盖)
 CANVAS_W = 1920.0
 CANVAS_H = 1080.0
-# Δt 归一化上限（默认值，数据集统计后自动覆盖）
+# Δt 归一化上限(默认值, 数据集统计后自动覆盖)
 MAX_DELTA_T = 50.0
 
 # 权重文件路径
 G_WEIGHT_PATH = "generator_wgan.pth"
 D_WEIGHT_PATH = "discriminator_wgan.pth"
-# 配置文件路径（保存画布、Δt等归一化参数）
+# 配置文件路径
 CONFIG_PATH = "model_config.json"
 
 # ---------------------- 全局配置动态设置 ----------------------
 def set_canvas_size(width, height):
-    """动态设置画布尺寸，由数据集统计后调用"""
+    """动态设置画布尺寸, 由数据集统计后调用"""
     global CANVAS_W, CANVAS_H
     CANVAS_W = float(width)
     CANVAS_H = float(height)
     print(f"[配置更新] 画布尺寸已设为: {CANVAS_W:.1f} x {CANVAS_H:.1f}")
 
 def set_max_delta_t(value):
-    """动态设置Δt归一化上限，由数据集统计后调用"""
+    """动态设置Δt归一化上限, 由数据集统计后调用"""
     global MAX_DELTA_T
     MAX_DELTA_T = float(value)
     print(f"[配置更新] Δt归一化上限已设为: {MAX_DELTA_T:.3f}")
 
 def save_config():
-    """保存当前所有归一化配置到文件，供推理时加载对齐"""
+    """保存当前所有归一化配置到文件, 供推理时加载对齐"""
     config = {
         "CANVAS_W": CANVAS_W,
         "CANVAS_H": CANVAS_H,
@@ -56,9 +56,9 @@ def save_config():
     print(f"[配置保存] 归一化参数已写入 {CONFIG_PATH}")
 
 def load_config():
-    """从文件加载归一化配置，保证推理与训练参数完全一致"""
+    """从文件加载归一化配置, 保证推理与训练参数完全一致"""
     if not os.path.exists(CONFIG_PATH):
-        print(f"[警告] 未找到配置文件 {CONFIG_PATH}，使用默认参数")
+        print(f"[警告] 未找到配置文件 {CONFIG_PATH}, 使用默认参数")
         return False
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -71,12 +71,11 @@ def load_config():
     return True
 
 def to_device(*tensors):
-    """批量迁移张量到设备，减少冗余代码"""
+    """批量迁移张量到设备"""
     return [t.to(DEVICE) for t in tensors]
 
-# ---------------------- 正弦位置编码 ----------------------
 class SinusoidalPositionalEncoding(nn.Module):
-    """为生成器注入绝对位置信息，解决静态初始特征时序多样性不足问题"""
+    """正弦位置编码, 为生成器注入绝对位置信息, 解决静态初始特征时序多样性不足问题"""
     def __init__(self, d_model, max_len=5000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -93,7 +92,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         seq_len = x.size(1)
         return x + self.pe[:, :seq_len, :]
 
-# ---------------------- 归一化工具函数 ----------------------
+# 归一化工具函数
 def normalize_xy(x, y):
     x_norm = (2 * x - CANVAS_W) / CANVAS_W
     y_norm = (2 * y - CANVAS_H) / CANVAS_H
@@ -135,7 +134,7 @@ def normalize_cond(cond_pixel):
     x1n, y1n = normalize_xy(x1, y1)
     return [x0n, y0n, x1n, y1n]
 
-# ---------------------- 生成器 ----------------------
+# 生成器
 class CondGenerator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -162,20 +161,23 @@ class CondGenerator(nn.Module):
         b_size = cond.shape[0]
         device = cond.device
 
+        # 随机噪声 + 条件拼接
         z = torch.randn(b_size, Z_DIM, device=device)
         z_cond = torch.cat([cond, z], dim=-1)
-        hidden_feat = self.input_proj(z_cond)
+        hidden_feat = self.input_proj(z_cond)   # Linear(36→96) → [B,96]
 
+        # 每一步都带上全局条件
         hidden_seq = hidden_feat.unsqueeze(1).expand(-1, seq_len, -1)
         cond_expand = cond.unsqueeze(1).expand(-1, seq_len, -1)
-        lstm_input = torch.cat([hidden_seq, cond_expand], dim=-1)
+        lstm_input = torch.cat([hidden_seq, cond_expand], dim=-1)   # [B, L, 100]
 
-        lstm_input = self.pos_enc(lstm_input)
-        lstm_out, _ = self.lstm(lstm_input)
-        traj = self.out_fc(lstm_out)
+        
+        lstm_input = self.pos_enc(lstm_input)   # 位置编码
+        lstm_out, _ = self.lstm(lstm_input)     # LSTM 前向, [B, L, 96]
+        traj = self.out_fc(lstm_out)            # [B, L, 3]
         return traj
 
-# ---------------------- 判别器 ----------------------
+# 判别器
 class Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -196,16 +198,19 @@ class Discriminator(nn.Module):
         batch_size, max_len, _ = traj_seq.shape
         device = traj_seq.device
 
+        # 条件复制到每一步时序
         cond_expand = cond.unsqueeze(1).expand(-1, max_len, -1)
         x = torch.cat([traj_seq, cond_expand], dim=-1)
 
+        # 只把有效轨迹送入LSTM, 尾部0不参与计算
         packed_x = pack_padded_sequence(
             x, seq_lengths.cpu(), batch_first=True, enforce_sorted=True
         )
         packed_feat, _ = self.lstm(packed_x)
+        # 还原规整张量, padding位置恢复0
         feat, _ = pad_packed_sequence(packed_feat, batch_first=True, total_length=max_len)
 
-        # 掩码平均池化，屏蔽padding无效位
+        # 掩码平均池化
         mask = torch.arange(max_len, device=device).unsqueeze(0) < seq_lengths.unsqueeze(1)
         mask = mask.unsqueeze(-1).float()
         feat_sum = (feat * mask).sum(dim=1)
@@ -214,20 +219,20 @@ class Discriminator(nn.Module):
         score = self.class_head(feat_avg)
         return score
 
-# ---------------------- 权重工具 ----------------------
+# 权重工具 
 def load_model_weights(model, weight_path):
     if os.path.exists(weight_path):
         model.load_state_dict(torch.load(weight_path, map_location=DEVICE))
         print(f"成功加载权重：{weight_path}")
         return True
     else:
-        print(f"未找到权重文件：{weight_path}，使用随机初始化")
+        print(f"未找到权重文件：{weight_path}, 使用随机初始化")
         return False
 
-# ---------------------- 推理函数 ----------------------
+# 推理函数
 def generate_single_trajectory(cond_pixel_list, seq_len):
     if not isinstance(seq_len, int) or seq_len < 2:
-        raise ValueError(f"序列长度必须≥2，当前输入: {seq_len}")
+        raise ValueError(f"序列长度必须≥2, 当前输入: {seq_len}")
 
     gen = CondGenerator().to(DEVICE)
     load_model_weights(gen, G_WEIGHT_PATH)
